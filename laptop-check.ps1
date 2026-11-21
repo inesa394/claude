@@ -50,19 +50,35 @@ Hdr "Fehler in der Ereignisanzeige (letzte 24h)"
 $since = (Get-Date).AddHours(-24)
 foreach ($log in 'System', 'Application') {
   $ev = Get-WinEvent -FilterHashtable @{LogName = $log; Level = 1, 2; StartTime = $since } -MaxEvents 200
-  if ($ev) {
-    Warn "$log : $($ev.Count) Fehler (Top-Quellen):"
-    $ev | Group-Object ProviderName | Sort-Object Count -Descending | Select-Object -First 5 |
-      ForEach-Object { Info "$($_.Count)x $($_.Name)" }
-  } else { Ok "$log : keine Fehler" }
+  # Bekannte harmlose Ereignisse ausblenden: DistributedCOM 10016 (COM-Berechtigungen)
+  $noise = @($ev | Where-Object { $_.ProviderName -eq 'Microsoft-Windows-DistributedCOM' -and $_.Id -eq 10016 })
+  $ev = @($ev | Where-Object { -not ($_.ProviderName -eq 'Microsoft-Windows-DistributedCOM' -and $_.Id -eq 10016) })
+  if ($noise.Count) { Info "$($noise.Count)x DistributedCOM 10016 ignoriert (harmlos)" }
+  if ($ev.Count) {
+    Warn "$log : $($ev.Count) Fehler:"
+    $ev | Group-Object ProviderName, Id | Sort-Object Count -Descending | Select-Object -First 8 | ForEach-Object {
+      $first = $_.Group[0]
+      $msg = ($first.Message -split "`r?`n")[0]
+      if ($msg.Length -gt 110) { $msg = $msg.Substring(0, 110) + '...' }
+      Info ("{0}x {1} (ID {2}): {3}" -f $_.Count, $first.ProviderName, $first.Id, $msg)
+    }
+  } else { Ok "$log : keine relevanten Fehler" }
 }
 $bsod = Get-WinEvent -FilterHashtable @{LogName = 'System'; Id = 41, 1001; StartTime = $since } -MaxEvents 5
 if ($bsod) { Warn "Unerwarteter Neustart / Bluescreen in den letzten 24h" }
 
 Hdr "Wichtige Dienste"
-Get-CimInstance Win32_Service -Filter "StartMode='Auto' AND State<>'Running'" |
-  Where-Object { $_.Name -notmatch 'sppsvc|gupdate|edgeupdate|MapsBroker|RemoteRegistry|TrustedInstaller' } |
-  ForEach-Object { Warn "Dienst gestoppt: $($_.DisplayName)" }
+# Nur Dienste melden, die automatisch starten, NICHT verzoegert/triggerbasiert sind und dann trotzdem gestoppt sind.
+# Windows markiert verzoegerte Starts in der Registry (DelayedAutostart) und Trigger-Starts im Unterschluessel TriggerInfo.
+$noise = 'sppsvc|gupdate|GoogleUpdater|edgeupdate|MapsBroker|RemoteRegistry|TrustedInstaller|WMPNetworkSvc|SonosLibrary|HPDiag|HPAppHelper|CDPUserSvc|OneSyncSvc|wuauserv|BITS'
+Get-CimInstance Win32_Service -Filter "StartMode='Auto' AND State<>'Running'" | ForEach-Object {
+  $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$($_.Name)"
+  $delayed = (Get-ItemProperty $key -Name DelayedAutostart).DelayedAutostart -eq 1
+  $trigger = Test-Path "$key\TriggerInfo"
+  if (-not $delayed -and -not $trigger -and $_.Name -notmatch $noise -and $_.ExitCode -ne 0) {
+    Warn "Dienst gestoppt (ExitCode $($_.ExitCode)): $($_.DisplayName)"
+  }
+}
 
 Hdr "Netzwerk-Adapter"
 Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object {

@@ -16,6 +16,7 @@ done
 OS=$(uname -s)
 PROBLEMS=0
 have() { command -v "$1" >/dev/null 2>&1; }
+TO() { if have timeout; then timeout "${T:-10}" "$@"; else "$@"; fi; }
 hdr()  { printf '\n=== %s ===\n' "$1"; }
 ok()   { printf '  [OK]   %s\n' "$1"; }
 warn() { printf '  [WARN] %s\n' "$1"; PROBLEMS=$((PROBLEMS+1)); }
@@ -41,13 +42,13 @@ hdr "Arbeitsspeicher"
 if [ "$OS" = Linux ] && [ -r /proc/meminfo ]; then
   awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}/SwapTotal/{st=$2}/SwapFree/{sf=$2}
        END{if(t==0||a==0){print "         RAM-Daten nicht lesbar"; exit 0} p=100-a*100/t; printf "         RAM belegt: %.0f%% (%.1f/%.1f GB)\n",p,(t-a)/1048576,t/1048576;
-           if(p>90) exit 1}' && ok "RAM ok" || warn "RAM fast voll"
+           if(p>90) exit 1}' /proc/meminfo && ok "RAM ok" || warn "RAM fast voll"
 elif have vm_stat; then
   vm_stat | head -5 | sed 's/^/         /'
 fi
 
 hdr "Festplatten"
-df -hP 2>/dev/null | awk 'NR>1 && $1 ~ /^\/dev\// {print}' | while read -r fs size used avail pct mnt; do
+TO df -hP 2>/dev/null | awk 'NR>1 && $1 ~ /^\/dev\// {print}' | while read -r fs size used avail pct mnt; do
   p=${pct%\%}
   if [ "$p" -ge 90 ]; then warn "$mnt zu $pct voll ($avail frei)"; else ok "$mnt $pct belegt ($avail frei)"; fi
 done
@@ -91,10 +92,10 @@ if [ "$OS" = Linux ]; then
     [ -n "$f" ] && { warn "Fehlgeschlagene Dienste:"; echo "$f" | sed 's/^/         /'; } || ok "Keine fehlgeschlagenen systemd-Dienste"
   fi
   if have journalctl; then
-    n=$(journalctl -p err --since "24 hours ago" --no-pager -q 2>/dev/null | wc -l)
+    n=$(TO journalctl -p err --since "24 hours ago" --no-pager -q 2>/dev/null | wc -l)
     if [ "$n" -gt 0 ]; then
       warn "$n Fehlereinträge im Journal (Top-Quellen):"
-      journalctl -p err --since "24 hours ago" --no-pager -q -o short 2>/dev/null \
+      TO journalctl -p err --since "24 hours ago" --no-pager -q -o short 2>/dev/null \
         | awk '{print $5}' | sed 's/\[.*//; s/:$//' | sort | uniq -c | sort -nr | head -5 | sed 's/^/         /'
     else ok "Keine Fehler im Journal"; fi
   fi
